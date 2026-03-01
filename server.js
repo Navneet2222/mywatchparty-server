@@ -19,6 +19,10 @@ const io = new Server(server, {
     methods: ["GET", "POST"]
   }
 });
+// Add this basic route to test that the server is alive
+app.get('/', (req, res) => {
+  res.send('Mywatchparty Backend is Live and Running!');
+});
 
 // Room State Tracking
 const rooms = new Map();
