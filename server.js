@@ -2,116 +2,142 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
 
-// CORS configuration for production
 // --- WILDCARD CORS CONFIGURATION ---
-app.use(cors({
-  origin: "*", // Allows any Vercel preview link to connect
-  methods: ["GET", "POST"]
-}));
+const corsOptions = {
+  origin: "*",
+  methods: ["GET", "POST"],
+  credentials: true
+};
 
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
+app.use(cors(corsOptions));
+app.use(express.json());
+
+// --- FILE UPLOAD SETUP (50MB Limit) ---
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    // Append timestamp to prevent filename collisions
+    cb(null, Date.now() + '-' + file.originalname.replace(/\s+/g, '-'));
   }
 });
-// Add this basic route to test that the server is alive
-app.get('/', (req, res) => {
-  res.send('Mywatchparty Backend is Live and Running!');
+
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB strictly enforced
 });
 
-// Room State Tracking
+// Serve uploaded files securely
+app.use('/uploads', express.static(uploadDir));
+
+// Upload Endpoint
+app.post('/api/upload', upload.single('video'), (req, res) => {
+  if (!req.file) return res.status(400).send('No file uploaded.');
+  
+  // Return the path so the frontend can broadcast it
+  const fileUrl = `/uploads/${req.file.filename}`;
+  res.json({ url: fileUrl });
+});
+
+// --- 24-HOUR AUTO-DELETE CRON JOB ---
+// Runs every hour to check for old files
+setInterval(() => {
+  fs.readdir(uploadDir, (err, files) => {
+    if (err) return console.error('Cleanup read error:', err);
+    
+    const now = Date.now();
+    const twentyFourHours = 24 * 60 * 60 * 1000;
+
+    files.forEach(file => {
+      const filePath = path.join(uploadDir, file);
+      fs.stat(filePath, (err, stats) => {
+        if (err) return;
+        // If file is older than 24 hours, delete it
+        if (now - stats.mtimeMs > twentyFourHours) {
+          fs.unlink(filePath, err => {
+            if (!err) console.log(`Auto-deleted old file: ${file}`);
+          });
+        }
+      });
+    });
+  });
+}, 60 * 60 * 1000); // Check every 60 minutes
+
+
+// --- SOCKET.IO ROOM ENGINE ---
+const io = new Server(server, { cors: corsOptions });
 const rooms = new Map();
 
 io.on('connection', (socket) => {
   console.log(`User connected: ${socket.id}`);
 
-  // --- CORE ROOM EVENTS ---
-  
-  // Joining a room
-  socket.on('join-room', (roomId, username) => {
+  // 1. Joining a room (Now includes Video State)
+  socket.on('join-room', (roomId, username, initialVideoState = null) => {
     socket.join(roomId);
     
+    // If room doesn't exist, create it and set the host's video state
     if (!rooms.has(roomId)) {
-      rooms.set(roomId, { host: socket.id, participants: [] });
+      rooms.set(roomId, { 
+        host: socket.id, 
+        participants: [],
+        videoState: initialVideoState // { type: 'url'|'hosted'|'local', url: '...' }
+      });
     }
     
-    rooms.get(roomId).participants.push({ id: socket.id, name: username });
+    const room = rooms.get(roomId);
+    room.participants.push({ id: socket.id, name: username });
     
     // Notify others
     socket.to(roomId).emit('user-joined', { id: socket.id, name: username });
     
-    // Send current room state to the newcomer
-    socket.emit('room-state', rooms.get(roomId));
-    
-    console.log(`${username} joined room: ${roomId}`);
+    // Send full room state (including the video link!) to the newcomer
+    socket.emit('room-state', room);
   });
 
-  // Synchronization Events
-  socket.on('video-play', (data) => {
-    socket.to(data.roomId).emit('sync-play', data);
-  });
-
-  socket.on('video-pause', (data) => {
-    socket.to(data.roomId).emit('sync-pause');
-  });
-
-  socket.on('video-seek', (data) => {
-    socket.to(data.roomId).emit('sync-seek', data.currentTime);
-  });
-
-  // Chat Messaging
-  socket.on('send-message', (data) => {
-    io.in(data.roomId).emit('new-message', data);
-  });
-
-  // --- WebRTC SIGNALING EVENTS ---
+  // 2. Synchronization Events
+  socket.on('video-play', (data) => socket.to(data.roomId).emit('sync-play', data));
+  socket.on('video-pause', (data) => socket.to(data.roomId).emit('sync-pause'));
+  socket.on('video-seek', (data) => socket.to(data.roomId).emit('sync-seek', data.currentTime));
   
-  // 1. When a user wants to initiate a call
+  // 3. Chat Messaging
+  socket.on('send-message', (data) => io.in(data.roomId).emit('new-message', data));
+
+  // 4. WebRTC Signaling
   socket.on('sending-signal', payload => {
     io.to(payload.userToSignal).emit('user-joined-rtc', { 
-      signal: payload.signal, 
-      callerID: payload.callerID,
-      username: payload.username 
+      signal: payload.signal, callerID: payload.callerID, username: payload.username 
     });
   });
-
-  // 2. When the other user accepts the call
   socket.on('returning-signal', payload => {
-    io.to(payload.callerID).emit('receiving-returned-signal', { 
-      signal: payload.signal, 
-      id: socket.id 
-    });
+    io.to(payload.callerID).emit('receiving-returned-signal', { signal: payload.signal, id: socket.id });
   });
 
-  // --- DISCONNECT EVENT ---
-  
-  // Handle user disconnecting from voice/video and leaving the room
+  // 5. Disconnect Cleanup
   socket.on('disconnect', () => {
-    console.log(`User disconnected: ${socket.id}`);
-    
-    // Notify the room so they can remove the video element and clean up the state
     rooms.forEach((roomData, roomId) => {
       const participantIndex = roomData.participants.findIndex(p => p.id === socket.id);
-      
       if (participantIndex !== -1) {
         roomData.participants.splice(participantIndex, 1);
         socket.to(roomId).emit('user-disconnected', socket.id);
-        
-        // Optional: If the room is empty, delete it from the Map to free up memory
-        if (roomData.participants.length === 0) {
-          rooms.delete(roomId);
-        }
+        if (roomData.participants.length === 0) rooms.delete(roomId);
       }
     });
   });
 });
 
+// Simple health check route
+app.get('/', (req, res) => res.send('Mywatchparty Backend with File Uploads is Live!'));
+
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`Mywatchparty server active on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server active on port ${PORT}`));
