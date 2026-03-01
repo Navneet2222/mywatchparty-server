@@ -8,9 +8,8 @@ const server = http.createServer(app);
 
 // CORS configuration for production
 const allowedOrigins = [
-  const allowedOrigins = [
   "http://localhost:5173", 
-  "https://mywatchparty-client.vercel.app/" // PASTE YOUR LINK HERE (No trailing slash / at the end)
+  "https://mywatchparty-client.vercel.app" // Removed the trailing slash
 ];
 
 app.use(cors({
@@ -33,6 +32,8 @@ const rooms = new Map();
 io.on('connection', (socket) => {
   console.log(`User connected: ${socket.id}`);
 
+  // --- CORE ROOM EVENTS ---
+  
   // Joining a room
   socket.on('join-room', (roomId, username) => {
     socket.join(roomId);
@@ -54,7 +55,6 @@ io.on('connection', (socket) => {
 
   // Synchronization Events
   socket.on('video-play', (data) => {
-    // data: { roomId, currentTime }
     socket.to(data.roomId).emit('sync-play', data);
   });
 
@@ -68,13 +68,48 @@ io.on('connection', (socket) => {
 
   // Chat Messaging
   socket.on('send-message', (data) => {
-    // data: { roomId, text, sender }
     io.in(data.roomId).emit('new-message', data);
   });
 
+  // --- WebRTC SIGNALING EVENTS ---
+  
+  // 1. When a user wants to initiate a call
+  socket.on('sending-signal', payload => {
+    io.to(payload.userToSignal).emit('user-joined-rtc', { 
+      signal: payload.signal, 
+      callerID: payload.callerID,
+      username: payload.username 
+    });
+  });
+
+  // 2. When the other user accepts the call
+  socket.on('returning-signal', payload => {
+    io.to(payload.callerID).emit('receiving-returned-signal', { 
+      signal: payload.signal, 
+      id: socket.id 
+    });
+  });
+
+  // --- DISCONNECT EVENT ---
+  
+  // Handle user disconnecting from voice/video and leaving the room
   socket.on('disconnect', () => {
     console.log(`User disconnected: ${socket.id}`);
-    // Room cleanup logic would go here
+    
+    // Notify the room so they can remove the video element and clean up the state
+    rooms.forEach((roomData, roomId) => {
+      const participantIndex = roomData.participants.findIndex(p => p.id === socket.id);
+      
+      if (participantIndex !== -1) {
+        roomData.participants.splice(participantIndex, 1);
+        socket.to(roomId).emit('user-disconnected', socket.id);
+        
+        // Optional: If the room is empty, delete it from the Map to free up memory
+        if (roomData.participants.length === 0) {
+          rooms.delete(roomId);
+        }
+      }
+    });
   });
 });
 
