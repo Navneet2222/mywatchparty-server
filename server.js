@@ -7,22 +7,16 @@ const app = express();
 const server = http.createServer(app);
 
 // CORS configuration for production
-const allowedOrigins = [
-  "http://localhost:5173", 
-  "https://mywatchparty-client.vercel.app" // Removed the trailing slash
-];
-
+// --- WILDCARD CORS CONFIGURATION ---
 app.use(cors({
-  origin: allowedOrigins,
-  methods: ["GET", "POST"],
-  credentials: true
+  origin: "*", // Allows any Vercel preview link to connect
+  methods: ["GET", "POST"]
 }));
 
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigins,
-    methods: ["GET", "POST"],
-    credentials: true
+    origin: "*",
+    methods: ["GET", "POST"]
   }
 });
 
