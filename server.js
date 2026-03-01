@@ -8,8 +8,9 @@ const server = http.createServer(app);
 
 // CORS configuration for production
 const allowedOrigins = [
-  "http://localhost:3000",
-  "https://your-mywatchparty.vercel.app" // Update this after deploying frontend
+  const allowedOrigins = [
+  "http://localhost:5173", 
+  "https://mywatchparty-client.vercel.app/" // PASTE YOUR LINK HERE (No trailing slash / at the end)
 ];
 
 app.use(cors({
