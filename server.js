@@ -38,7 +38,7 @@ const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB strictly enforced
 });
 
-// Serve uploaded files securely
+// Serve uploaded files securely so the frontend can play them
 app.use('/uploads', express.static(uploadDir));
 
 // Upload Endpoint
@@ -91,7 +91,7 @@ io.on('connection', (socket) => {
       rooms.set(roomId, { 
         host: socket.id, 
         participants: [],
-        videoState: initialVideoState // { type: 'url'|'hosted'|'local', url: '...' }
+        videoState: initialVideoState // { type: 'cloud'|'hosted'|'local', url: '...' }
       });
     }
     
